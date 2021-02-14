@@ -10,69 +10,124 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-ALPHABET_SIZE = 256
+from torch.utils.data import Dataset, DataLoader
+
+KERNEL_SIZE = 3
+
 CHAR_EMBEDDING_DIM = 16
-WORD_EMBEDDING_DIM = 64
+WORD_EMBEDDING_DIM = 32
 HIDDEN_DIM = 64
 EPOCH_NUM = 20
 
+BATCH_SIZE = 10
+NUM_WORKERS = 10
 
-# def prepare_sequence(seq, word_to_ix, char_to_ix):
-#     idxs = []
-#     for word in seq:
-#         word_idx = word_to_ix[word]
-#         char_idxs = [char_to_ix[char] for char in word]
-#         idxs.append((word_idx, char_idx))
-#
-#     return torch.tensor(idxs, dtype=torch.long)
+ALPHABET_SIZE = 256
 
+UNKNOWN = ord(' ')  # 32
 
-def prepare_sequence(seq, to_ix, item_len):
-    # todo: padding index should be never used for other item
-    idxs = [to_ix[w] for w in seq] + [0] * (item_len - len(seq))
-    return torch.tensor(idxs, dtype=torch.long)
+# 'pneumonoultramicroscopicsilicovolcanoconiosis' - is the longest English word
+MAX_WORD_LENGTH = 45
 
 
-def load_data(path):
-    training_data = []
-    with open(path, "r") as input_file:
+def parse_line(raw_line):
+    words = []
+    tags = []
+    for entry in raw_line.split(' '):
+        split = entry.split('/')
+        words += split[:-1]
+        tags += [split[-1]] * len(split[:-1])
+    return words, tags
+
+
+def parse_file(path):
+    sentences = []
+    with open(path, 'r') as input_file:
         lines = input_file.read().splitlines()
         for line in lines:
-            sentences = []
-            tags = []
-            for token in line.split(' '):
-                split = token.split('/')
-                sentences += split[:-1]
-                tags += [split[-1]] * len(split[:-1])
-            training_data.append((sentences, tags))
+            sentence, tags = parse_line(line)
+            sentences.append((sentence, tags))
+    return sentences
 
-    word_to_ix = {}
-    char_to_ix = {}
-    tag_to_ix = {}
-    ix_to_tag = {}
 
-    for sentence, tags in training_data:
-        for word in sentence:
-            if word not in word_to_ix:
-                word_to_ix[word] = len(word_to_ix)
-            for char in word:
-                if char not in char_to_ix:
-                    char_to_ix[char] = len(char_to_ix)
-        for tag in tags:
-            if tag not in tag_to_ix:
-                ix_to_tag[len(tag_to_ix)] = tag
-                tag_to_ix[tag] = len(tag_to_ix)
+class POSDataset(Dataset):
+    def __init__(self, path):
+        sentences, tags = zip(*parse_file(path))
+        self.sentence_lengths = [len(sent) for sent in sentences]
 
-    print(word_to_ix)
-    print(char_to_ix)
-    print(tag_to_ix)
-    print(ix_to_tag)
+        self.word_to_ix, self.tag_to_ix, self.ix_to_tag = POSDataset.build_indices(sentences, tags)
 
-    return training_data, word_to_ix, char_to_ix, tag_to_ix, ix_to_tag
+        self.sentences = [self.encode_sentence(sentence) for sentence in sentences]
+        self.tags = [self.encode_tags(sentence_tags) for sentence_tags in tags]
+
+    @staticmethod
+    def build_indices(sentences, tags):
+        word_to_ix = {}
+        tag_to_ix = {}
+        ix_to_tag = {}
+
+        word_to_ix[' '] = UNKNOWN
+
+        for sentence, tags in zip(sentences, tags):
+            for word in sentence:
+                if word not in word_to_ix:
+                    word_to_ix[word] = len(word_to_ix)
+            for tag in tags:
+                if tag not in tag_to_ix:
+                    ix_to_tag[len(tag_to_ix)] = tag
+                    tag_to_ix[tag] = len(tag_to_ix)
+        return word_to_ix, tag_to_ix, ix_to_tag
+
+    def vocabulary_size(self):
+        return len(self.word_to_ix.keys())
+
+    def tagset_size(self):
+        return len(self.tag_to_ix.keys())
+
+    def pad_chars_encoding(self, word):
+        padder = UNKNOWN
+        return word + [padder] * (MAX_WORD_LENGTH - len(word))
+
+    def encode_word(self, word):
+        """
+        :param word: some
+        :return: [ CODE(SOME), CODE(S), CODE(O), CODE(M), CODE(E) ]
+        """
+        chars_encoding = [ord(c) for c in word]
+        chars_encoding = self.pad_chars_encoding(chars_encoding)
+        word_encoding = [self.word_to_ix[word]] + chars_encoding
+        return torch.tensor(word_encoding)
+
+    def max_sent_len(self):
+        return max(self.sentence_lengths)
+
+    def pad_sentence_encoding(self, sentence: list) -> list:
+        padder = torch.tensor([UNKNOWN] * (MAX_WORD_LENGTH + 1))
+        return sentence + [padder] * (self.max_sent_len() - len(sentence))
+
+    def encode_sentence(self, sentence):
+        sentence_encoding = [self.encode_word(word) for word in sentence]
+        sentence_encoding = self.pad_sentence_encoding(sentence_encoding)
+        return torch.stack(sentence_encoding)
+
+    def pad_tags_encoding(self, tags):
+        padder = [UNKNOWN]
+        return tags + padder * (self.max_sent_len() - len(tags))
+
+    def encode_tags(self, sentence_tags):
+        tags_encoding = [self.tag_to_ix[tag] for tag in sentence_tags]
+        tags_encoding = self.pad_tags_encoding(tags_encoding)
+        return torch.tensor(tags_encoding)
+
+    def __len__(self):
+        return len(self.sentences)
+
+    def __getitem__(self, idx):
+        return self.sentences[idx], self.tags[idx], self.sentence_lengths[idx]
 
 
 class CharEmbedding(nn.Module):
-    def __init__(self, alphabet_size, embedding_dim, kernel_size):
+    def __init__(self, embedding_dim, kernel_size, alphabet_size=ALPHABET_SIZE):
         super(CharEmbedding, self).__init__()
         self.embedding = nn.Embedding(alphabet_size, embedding_dim)
         self.char_cnn = nn.Sequential(
@@ -81,80 +136,90 @@ class CharEmbedding(nn.Module):
             nn.ReLU(),
         )
 
-    def forward(self, word):
-        out = self.embedding(word)
-        print(out.shape)
+    def forward(self, chars_encoding):
+        # (bath size, sentence len, word len)
+        bs, sl, wl = chars_encoding.shape
+        out = chars_encoding.view(bs * sl, wl)
+        out = self.embedding(out)
         out = torch.transpose(out, 1, 2)
-        print(out.shape)
         out = self.char_cnn(out)
-        print(out.shape)
         out, _ = torch.max(out, dim=2)
-        print(out.shape)
+        out = out.view(bs, sl, -1)
         return out
 
 
-class LSTMTagger(nn.Module):
-    def __init__(self, char_embedding_dim, word_embedding_dim, hidden_dim, alphabet_size, vocab_size, tagset_size):
-        super(LSTMTagger, self).__init__()
-        self.onehot_encodding = nn.functional.one_hot
-        self.char_embedding = CharEmbedding(alphabet_size, char_embedding_dim, 3)
-        self.hidden_dim = hidden_dim
+class Embedding(nn.Module):
+    def __init__(self, vocab_size, word_embedding_dim, char_embedding_dim, kernel_size):
+        super(Embedding, self).__init__()
+        self.char_embeddings = CharEmbedding(char_embedding_dim, kernel_size)
         self.word_embeddings = nn.Embedding(vocab_size, word_embedding_dim)
-        self.lstm = nn.LSTM(word_embedding_dim, hidden_dim, bidirectional=True)
+
+    def forward(self, encoding):
+        c_emb = self.char_embeddings(encoding[:, :, 1:])
+        w_emb = self.word_embeddings(encoding[:, :, 0])
+        emb = torch.cat([w_emb, c_emb], dim=2)
+        return emb
+
+
+class LSTMTagger(nn.Module):
+    def __init__(self, emb_dim, hidden_dim, tagset_size):
+        super(LSTMTagger, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.lstm = nn.LSTM(emb_dim, hidden_dim, bidirectional=True, batch_first=True)
         self.hidden2tag = nn.Linear(hidden_dim * 2, tagset_size)
 
-    def forward(self, sentence):
-        # print(sentence)
-        # onehot_encoddings = self.onehot_encodding(sentence)
-        # print(onehot_encoddings.shape)
-        # char_embeddings = self.char_cnn(onehot_encoddings)
-        # print(char_embeddings.shape)
-        word_embeddings = self.word_embeddings(sentence)
-        word_embeddings = word_embeddings.view(len(sentence), 1, -1)
-
-        lstm_out, _ = self.lstm(word_embeddings)
-        lstm_out = lstm_out.view(len(sentence), -1)
+    def forward(self, emb):
+        lstm_out, _ = self.lstm(emb)
         tag_space = self.hidden2tag(lstm_out)
-        tag_scores = F.log_softmax(tag_space, dim=1)
+        tag_scores = F.log_softmax(tag_space, dim=2)
         return tag_scores
 
 
+#
+class POSTagger(nn.Module):
+    def __init__(self, word_embedding_dim, char_embedding_dim, kernel_size, hidden_dim,
+                 vocab_size, tagset_size):
+        super(POSTagger, self).__init__()
+
+        self.embedding = Embedding(vocab_size, word_embedding_dim, char_embedding_dim, kernel_size)
+        self.lstm = LSTMTagger(word_embedding_dim + char_embedding_dim, hidden_dim, tagset_size)
+
+    def forward(self, sentence_encoding):
+        out = self.embedding(sentence_encoding)
+        out = self.lstm(out)
+        return out
+
+
+def loss_func(x, y, l, func=nn.NLLLoss()):
+    xs = torch.cat([xi[:li] for xi, li in zip(x, l)])
+    ys = torch.cat([yi[:li] for yi, li in zip(y, l)])
+    return func(xs, ys)
+
+
 def train_model(train_file, model_file):
-    training_data, word_to_ix, char_to_ix, tag_to_ix, ix_to_tag = load_data(train_file)
-    max_word_len = max([len(w) for w in word_to_ix.keys()])
+    dataset = POSDataset(train_file)
+    dl = DataLoader(dataset, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS)
 
-    char_emb = CharEmbedding(len(char_to_ix), CHAR_EMBEDDING_DIM, 3)
-
-    model = LSTMTagger(CHAR_EMBEDDING_DIM, WORD_EMBEDDING_DIM, HIDDEN_DIM, ALPHABET_SIZE, len(word_to_ix),
-                       len(tag_to_ix))
-    loss_function = nn.NLLLoss()
-    optimizer = optim.SGD(model.parameters(), lr=0.1)
+    pos_tagger = POSTagger(
+        WORD_EMBEDDING_DIM, CHAR_EMBEDDING_DIM, KERNEL_SIZE,
+        HIDDEN_DIM, dataset.vocabulary_size(), dataset.tagset_size(),
+    )
+    optimizer = optim.SGD(pos_tagger.parameters(), lr=0.1)
 
     for epoch in range(EPOCH_NUM):
-        for sentence, tags in training_data:
-            model.zero_grad()
+        pos_tagger.zero_grad()
+        for batch in iter(dl):
+            sentence_batch, tags_batch, length_batch = batch
+            tag_scores = pos_tagger(sentence_batch)
+            loss = loss_func(tag_scores, tags_batch, length_batch)
+            loss.backward()
+            optimizer.step()
+            # print(loss)
 
-            # sentence_in = prepare_sequence(sentence, word_to_ix)
-            # print(sentence_in)
-            # targets = prepare_sequence(tags, tag_to_ix)
-            s = torch.stack([prepare_sequence(word, char_to_ix, max_word_len) for word in sentence])
-            print(s.shape)
-            t = char_emb(s)
-            print('PPPPP', t.shape)
-            # tag_scores = model(sentence_in)
-
-            # loss = loss_function(tag_scores, targets)
-            # loss.backward()
-            # optimizer.step()
         print("Epoch #{} passed. Saving to the model file.".format(epoch))
 
-    # See what the scores are after training
-    with torch.no_grad():
-        inputs = prepare_sequence(training_data[0][0], word_to_ix)
-        tag_scores = model(inputs)
-        print(tag_scores)
-
-    torch.save(model.state_dict(), model_file)
+    conf = dict(WORD_INDEX=dataset.word_to_ix, TAG_INDEX=dataset.tag_to_ix, MODEL_STATE_DICT=pos_tagger.state_dict())
+    torch.save(conf, model_file)
 
     print('Finished...')
 
