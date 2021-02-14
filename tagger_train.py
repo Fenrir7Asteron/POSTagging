@@ -1,14 +1,11 @@
 # python3.7 tagger_train.py <train_file_absolute_path> <model_file_absolute_path>
 
-import pickle
 import sys
-from random import uniform
-
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from tqdm import tqdm
 
 from torch.utils.data import Dataset, DataLoader
 
@@ -16,18 +13,17 @@ KERNEL_SIZE = 3
 
 CHAR_EMBEDDING_DIM = 16
 WORD_EMBEDDING_DIM = 32
-HIDDEN_DIM = 64
-EPOCH_NUM = 20
+HIDDEN_DIM = 32
+EPOCH_NUM = 2
 
 BATCH_SIZE = 10
-NUM_WORKERS = 10
+NUM_WORKERS = 0
 
 ALPHABET_SIZE = 256
 
 UNKNOWN = ord(' ')  # 32
 
-# 'pneumonoultramicroscopicsilicovolcanoconiosis' - is the longest English word
-MAX_WORD_LENGTH = 45
+MAX_WORD_LENGTH = 64
 
 
 def parse_line(raw_line):
@@ -56,6 +52,7 @@ class POSDataset(Dataset):
         self.sentence_lengths = [len(sent) for sent in sentences]
 
         self.word_to_ix, self.tag_to_ix, self.ix_to_tag = POSDataset.build_indices(sentences, tags)
+        self.word_encoddings = {}
 
         self.sentences = [self.encode_sentence(sentence) for sentence in sentences]
         self.tags = [self.encode_tags(sentence_tags) for sentence_tags in tags]
@@ -93,10 +90,15 @@ class POSDataset(Dataset):
         :param word: some
         :return: [ CODE(SOME), CODE(S), CODE(O), CODE(M), CODE(E) ]
         """
+        if word in self.word_encoddings:
+            return self.word_encoddings[word]
+
         chars_encoding = [ord(c) for c in word]
         chars_encoding = self.pad_chars_encoding(chars_encoding)
         word_encoding = [self.word_to_ix[word]] + chars_encoding
-        return torch.tensor(word_encoding)
+        result = torch.tensor(word_encoding)
+        self.word_encoddings[word] = result
+        return result
 
     def max_sent_len(self):
         return max(self.sentence_lengths)
@@ -208,7 +210,7 @@ def train_model(train_file, model_file):
 
     for epoch in range(EPOCH_NUM):
         pos_tagger.zero_grad()
-        for batch in iter(dl):
+        for batch in tqdm(iter(dl)):
             sentence_batch, tags_batch, length_batch = batch
             tag_scores = pos_tagger(sentence_batch)
             loss = loss_func(tag_scores, tags_batch, length_batch)
@@ -218,8 +220,8 @@ def train_model(train_file, model_file):
 
         print("Epoch #{} passed. Saving to the model file.".format(epoch))
 
-    conf = dict(WORD_INDEX=dataset.word_to_ix, TAG_INDEX=dataset.tag_to_ix, MODEL_STATE_DICT=pos_tagger.state_dict())
-    torch.save(conf, model_file)
+        conf = dict(WORD_INDEX=dataset.word_to_ix, TAG_INDEX=dataset.tag_to_ix, MODEL_STATE_DICT=pos_tagger.state_dict())
+        torch.save(conf, model_file)
 
     print('Finished...')
 

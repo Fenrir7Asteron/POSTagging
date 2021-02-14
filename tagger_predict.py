@@ -1,37 +1,28 @@
 # python3.7 tagger_predict.py <test_file_absolute_path> <model_file_absolute_path> <output_file_absolute_path>
 
-import os
 import sys
-import torch
-import numpy as np
-import pickle
-import sys
-from random import uniform
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
-
-from torch.utils.data import Dataset, DataLoader
-
-
+from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
+import multiprocessing
 
 KERNEL_SIZE = 3
 
 CHAR_EMBEDDING_DIM = 16
-WORD_EMBEDDING_DIM = 64
-HIDDEN_DIM = 64
-EPOCH_NUM = 20
+WORD_EMBEDDING_DIM = 32
+HIDDEN_DIM = 32
 
 BATCH_SIZE = 10
-NUM_WORKERS = 16
+NUM_WORKERS = 0
 
 ALPHABET_SIZE = 256
 
 UNKNOWN = ord(' ')  # 32
+
+MAX_WORD_LENGTH = 64
 
 
 def parse_file(path):
@@ -51,6 +42,7 @@ class POSTestDataset(Dataset):
 
         self.word_to_ix = word_to_ix
         self.tag_to_ix = tag_to_ix
+        self.word_encoddings = {}
 
         self.sentences = [self.encode_sentence(sentence) for sentence in sentences]
 
@@ -60,32 +52,34 @@ class POSTestDataset(Dataset):
     def tagset_size(self):
         return len(self.tag_to_ix.keys())
 
-    def max_word_len(self):
-        return max([len(w) for w in self.word_to_ix.keys()])
-
     def pad_chars_encoding(self, word):
         padder = UNKNOWN
         # In case word is longer than any of the training dataset
         # it is truncated to the known maximum word length
-        padded = word + [padder] * (self.max_word_len() - len(word))
-        return padded[:self.max_word_len()]
+        padded = word + [padder] * (MAX_WORD_LENGTH - len(word))
+        return padded[:MAX_WORD_LENGTH]
 
     def encode_word(self, word):
         """
         :param word: some
         :return: [ CODE(SOME), CODE(S), CODE(O), CODE(M), CODE(E) ]
         """
+        if word in self.word_encoddings:
+            return self.word_encoddings[word]
+
         chars_encoding = [ord(c) for c in word]
         chars_encoding = self.pad_chars_encoding(chars_encoding)
         w_code = self.word_to_ix[word] if word in self.word_to_ix else UNKNOWN
         word_encoding = [w_code] + chars_encoding
-        return torch.tensor(word_encoding)
+        result = torch.tensor(word_encoding)
+        self.word_encoddings[word] = result
+        return result
 
     def max_sent_len(self):
         return max(self.sentence_lengths)
 
     def pad_sentence_encoding(self, sentence: list) -> list:
-        padder = torch.tensor([UNKNOWN] * (self.max_word_len() + 1))
+        padder = torch.tensor([UNKNOWN] * (MAX_WORD_LENGTH + 1))
         return sentence + [padder] * (self.max_sent_len() - len(sentence))
 
     def encode_sentence(self, sentence):
@@ -98,6 +92,7 @@ class POSTestDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.sentences[idx], self.sentence_lengths[idx]
+
 
 class CharEmbedding(nn.Module):
     def __init__(self, embedding_dim, kernel_size, alphabet_size=ALPHABET_SIZE):
@@ -151,26 +146,24 @@ class LSTMTagger(nn.Module):
 #
 class POSTagger(nn.Module):
     def __init__(self, word_embedding_dim, char_embedding_dim, kernel_size, hidden_dim,
-                 vocab_size, tagset_size, word_to_ix, tag_to_ix):
+                 vocab_size, tagset_size):
         super(POSTagger, self).__init__()
 
         self.embedding = Embedding(vocab_size, word_embedding_dim, char_embedding_dim, kernel_size)
         self.lstm = LSTMTagger(word_embedding_dim + char_embedding_dim, hidden_dim, tagset_size)
-
-        # needed for predictions
-        self.word_to_ix = word_to_ix
-        self.tag_to_ix = tag_to_ix
 
     def forward(self, sentence_encoding):
         out = self.embedding(sentence_encoding)
         out = self.lstm(out)
         return out
 
+
 def tag_sentence(test_file, model_file, out_file):
     conf = torch.load(model_file)
     word_to_ix = conf['WORD_INDEX']
     tag_to_ix = conf['TAG_INDEX']
     model_state_dict = conf['MODEL_STATE_DICT']
+
 
     dataset = POSTestDataset(test_file, word_to_ix, tag_to_ix)
     dl = DataLoader(dataset, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS)
@@ -180,37 +173,31 @@ def tag_sentence(test_file, model_file, out_file):
         HIDDEN_DIM, dataset.vocabulary_size(), dataset.tagset_size()
     )
 
+    ix_to_tag = {v:k for k, v in tag_to_ix.items()}
+    ix_to_word = {v:k for k, v in word_to_ix.items()}
+
     pos_tagger.load_state_dict(model_state_dict)
-    # dataset = POSTestDataset(test_file, pos_tagger['word_to_ix'], pos_tagger['tag_to_ix'])
-    # dl = DataLoader(dataset, batch_size=BATCH_SIZE, num_workers=0)
-    #
-    # pos_tagger.zero_grad()
-    # pos_tagger.eval()
-    # test_result = []
-    # with torch.no_grad():
-    #     for batch in dl:
-    #         sentence_batch, len_batch = batch
-    #         tag_scores = pos_tagger(sentence_batch)
-    #         outputs = torch.argmax(tag_scores, dim=2)
-    #         print(outputs)
+    pos_tagger.zero_grad()
+    pos_tagger.eval()
+    sentences =[]
+    predictions = []
 
-            # inputs = prepare_sequence(sentence, word_to_ix)
-            # tag_scores = model(inputs)
-            # outputs = torch.argmax(tag_scores, dim=1).tolist()
-            # tags = [ix_to_tag[w] for w in outputs]
-            # test_result.append(tags)
+    with torch.no_grad():
+        for batch in iter(dl):
+            sentence_batch, len_batch = batch
+            tag_scores = pos_tagger(sentence_batch)
+            outputs = torch.argmax(tag_scores, dim=2)
 
-    # with open(out_file, "w") as output_file:
-    #     output_file.truncate(0)
-    #     for i in range(len(test_data)):
-    #         sentence = test_data[i]
-    #         output_line = ""
-    #         for j in range(len(sentence)):
-    #             word = sentence[j]
-    #             tag = test_result[i][j]
-    #             output_line += '/'.join([word, tag]) + ' '
-    #             print('/'.join([word, tag]), end=" ")
-    #         output_file.write(output_line + "\n")
+            for sent in outputs:
+                predictions.append([ix_to_tag[w.tolist()] for w in sent])
+
+            sentences+=sentence_batch
+
+    with open(out_file, "w") as output_file:
+        output_file.truncate(0)
+        for sent, tags in zip(sentences, predictions):
+            line = ' '.join([f'{ix_to_word[word[0].tolist()]}/{tag}' for word, tag in zip(sent, tags)]) + '\n'
+            output_file.write(line)
 
     print('Finished...')
 
