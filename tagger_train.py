@@ -209,7 +209,6 @@ def train_model(train_file, model_file):
     for epoch in range(EPOCH_NUM):
         pos_tagger.zero_grad()
         for batch in iter(dl):
-            print("START")
             sentence_batch, tags_batch, length_batch = batch
             tag_scores = pos_tagger(sentence_batch)
             loss = loss_func(tag_scores, tags_batch, length_batch)
