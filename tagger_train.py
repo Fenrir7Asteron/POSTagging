@@ -5,18 +5,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from tqdm import tqdm
 
 from torch.utils.data import Dataset, DataLoader
 
 KERNEL_SIZE = 3
 
 CHAR_EMBEDDING_DIM = 16
-WORD_EMBEDDING_DIM = 32
-HIDDEN_DIM = 32
+WORD_EMBEDDING_DIM = 16
+HIDDEN_DIM = 16
 EPOCH_NUM = 2
 
-BATCH_SIZE = 10
+BATCH_SIZE = 100
 NUM_WORKERS = 0
 
 ALPHABET_SIZE = 256
@@ -177,7 +176,6 @@ class LSTMTagger(nn.Module):
         return tag_scores
 
 
-#
 class POSTagger(nn.Module):
     def __init__(self, word_embedding_dim, char_embedding_dim, kernel_size, hidden_dim,
                  vocab_size, tagset_size):
@@ -210,13 +208,13 @@ def train_model(train_file, model_file):
 
     for epoch in range(EPOCH_NUM):
         pos_tagger.zero_grad()
-        for batch in tqdm(iter(dl)):
+        for batch in iter(dl):
+            print("START")
             sentence_batch, tags_batch, length_batch = batch
             tag_scores = pos_tagger(sentence_batch)
             loss = loss_func(tag_scores, tags_batch, length_batch)
             loss.backward()
             optimizer.step()
-            # print(loss)
 
         print("Epoch #{} passed. Saving to the model file.".format(epoch))
 
